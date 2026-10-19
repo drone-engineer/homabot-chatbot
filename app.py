@@ -17,7 +17,7 @@ from langchain_openai import OpenAIEmbeddings
 from langgraph.graph import StateGraph, START, END
 
 # ==============================================================================
-# 1. 안전하게 비밀 열쇠(API 키) 꺼내오기
+# 1. API 키 불러오기
 # ==============================================================================
 load_dotenv()
 
@@ -37,20 +37,33 @@ if not OPENAI_API_KEY or OPENAI_API_KEY.startswith("운영팀에서_"):
 client = OpenAI(api_key=OPENAI_API_KEY, timeout=60.0, max_retries=2)
 
 # ==============================================================================
-# 2. PDF 매뉴얼 책 읽기 및 검색 (RAG 기능)
+# 2. PDF 매뉴얼 책 읽기 (호마봇 + 삼성 매뉴얼 다중 RAG 지원)
 # ==============================================================================
-@st.cache_resource(show_spinner="HomaBot 설명서 책을 읽어서 색인표를 만드는 중입니다...")
+@st.cache_resource(show_spinner="설명서(호마봇/삼성)를 읽어서 통합 색인표를 만드는 중입니다...")
 def make_manual_database():
-    pdf_file = Path("homabot_manual.pdf")
-    if not pdf_file.exists() and (Path.cwd().parent / "homabot_manual.pdf").exists():
-        pdf_file = Path.cwd().parent / "homabot_manual.pdf"
+    # 읽어올 대상 PDF 파일 목록 (띄어쓰기 파일명 및 영문명 모두 지원)
+    target_files = ["homabot_manual.pdf", "삼성로봇청소기 메뉴얼.pdf", "samsung_manual.pdf"]
 
-    if not pdf_file.exists():
+    all_pages = []
+    for fname in target_files:
+        fpath = Path(fname)
+        # 상위 폴더에 있는 경우도 검사
+        if not fpath.exists() and (Path.cwd().parent / fname).exists():
+            fpath = Path.cwd().parent / fname
+
+        if fpath.exists():
+            loader = PyPDFLoader(str(fpath))
+            docs = loader.load()
+            for doc in docs:
+                # 어느 파일에서 나온 페이지인지 파일명을 기록
+                doc.metadata["source_name"] = fpath.name
+            all_pages.extend(docs)
+
+    if not all_pages:
         return None
 
-    pages = PyPDFLoader(str(pdf_file)).load()
     text_cutter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    small_chunks = text_cutter.split_documents(pages)
+    small_chunks = text_cutter.split_documents(all_pages)
 
     magic_embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
     digital_library = FAISS.from_documents(small_chunks, magic_embeddings)
@@ -59,21 +72,28 @@ def make_manual_database():
 def answer_from_manual(user_question: str):
     digital_library = make_manual_database()
     if digital_library is None:
-        return "[오류] homabot_manual.pdf 파일이 없습니다. 프로젝트 폴더에 넣어주세요.", []
+        return "[오류] 매뉴얼 PDF 파일이 없습니다. 프로젝트 폴더에 PDF를 넣어주세요.", []
 
+    # 상위 3개 청크 검색
     best_chunks = digital_library.similarity_search(user_question, k=3)
     if not best_chunks:
         return "설명서에서 관련된 내용을 찾지 못했습니다.", []
 
     reference_texts = []
-    found_pages = set()
+    # 파일별로 참조한 페이지를 모으기 위한 딕셔너리 {파일명: {페이지1, 페이지2}}
+    sources_dict = {}
     for chunk in best_chunks:
+        source_name = chunk.metadata.get("source_name", "manual.pdf")
         page_num = chunk.metadata.get("page", 0) + 1
-        found_pages.add(page_num)
-        reference_texts.append(f"--- [참고 {page_num}페이지] ---\n" + chunk.page_content)
+
+        if source_name not in sources_dict:
+            sources_dict[source_name] = set()
+        sources_dict[source_name].add(page_num)
+
+        reference_texts.append(f"--- [{source_name} {page_num}페이지] ---\n" + chunk.page_content)
 
     rules = (
-        "당신은 HomaBot 제품 안내원입니다. 아래 설명서 내용에 있는 사실만 친절하게 답하세요.\n"
+        "당신은 가전제품 안내원입니다. 아래 제공된 제품 설명서 내용에 근거해서만 친절하게 답하세요.\n"
         "설명서에 없는 가격이나 사양은 마음대로 지어내지 말고 고객센터로 문의하라고 안내하세요.\n\n"
         f"[설명서 내용]\n" + "\n\n".join(reference_texts)
     )
@@ -87,9 +107,9 @@ def answer_from_manual(user_question: str):
                 {"role": "user", "content": user_question}
             ]
         )
-        return reply.choices[0].message.content, sorted(list(found_pages))
+        return reply.choices[0].message.content, sources_dict
     except OpenAIError as e:
-        return f"인공지능 답변 실패: {e}", []
+        return f"인공지능 답변 실패: {e}", {}
 
 # ==============================================================================
 # 3. 구글 웹 검색 (SerpAPI + LangGraph 기능)
@@ -182,7 +202,6 @@ def step_write_answer(state: WebQAState) -> WebQAState:
         )
         final_text = ai_resp.choices[0].message.content.strip()
 
-        # 출처 링크 줄바꿈 처리
         link_list_text = []
         for i, item in enumerate(docs, start=1):
             date_info = item["date"] if item["date"] else "작성일 미제공"
@@ -202,10 +221,10 @@ graph_builder.add_edge("writer_node", END)
 web_chatbot_app = graph_builder.compile()
 
 # ==============================================================================
-# 4. Streamlit 화면 디자인 (중앙 정렬 + 900px 너비 최적화)
+# 4. Streamlit 화면 디자인 및 대화창
 # ==============================================================================
 st.set_page_config(
-    page_title="HomaBot 안내 챗봇",
+    page_title="통합 로봇청소기 가이드 챗봇",
     page_icon="🤖",
     layout="centered"
 )
@@ -227,8 +246,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🤖 HomaBot 설명서 & 구글 검색 통합 챗봇")
-st.caption("궁금한 방식을 선택하고 아래에 질문을 입력해 보세요!")
+st.title("🤖 스마트 로봇청소기 & 웹 검색 통합 챗봇")
+st.caption("호마봇, 삼성 로봇청소기 설명서 검색 및 최신 구글 웹 검색을 지원합니다.")
 
 search_mode = st.radio(
     "어디서 찾을까요?",
@@ -258,10 +277,15 @@ if user_input:
         with st.chat_message("assistant"):
             with st.spinner("자료를 찾고 답변을 만드는 중입니다..."):
                 if search_mode == "매뉴얼에서 찾기":
-                    bot_text, pages = answer_from_manual(clean_query)
-                    if pages:
-                        pages_str = ", ".join([f"p.{p}" for p in pages])
-                        final_output = f"{bot_text}\n\n📌 **참조 설명서 페이지:** `homabot_manual.pdf` ({pages_str})"
+                    bot_text, sources_dict = answer_from_manual(clean_query)
+                    if sources_dict:
+                        source_lines = []
+                        for s_name, p_set in sources_dict.items():
+                            p_list = sorted(list(p_set))
+                            p_str = ", ".join([f"p.{p}" for p in p_list])
+                            source_lines.append(f"`{s_name}` ({p_str})")
+
+                        final_output = f"{bot_text}\n\n📌 **참조 설명서:** " + " / ".join(source_lines)
                     else:
                         final_output = bot_text
                 else:
