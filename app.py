@@ -41,7 +41,6 @@ client = OpenAI(api_key=OPENAI_API_KEY, timeout=60.0, max_retries=2)
 # ==============================================================================
 @st.cache_resource(show_spinner="HomaBot 및 삼성 매뉴얼 문서를 읽어 통합 색인표를 구성하는 중입니다...")
 def get_vector_store():
-    # 프로젝트 폴더 내 매뉴얼 대상 파일 목록 (영문 및 한글 명칭 동시 지원)
     target_filenames = [
         "homabot_manual.pdf",
         "samsung_manual.pdf",
@@ -140,7 +139,6 @@ class QAState(TypedDict, total=False):
     answer: str
     error: str
 
-# 1) 경로 선택 노드 (규칙 기반 확장 라우팅)
 def node_route_question(state: QAState) -> QAState:
     mode = state.get("selected_mode", "자동 선택")
     if mode == "매뉴얼 검색":
@@ -152,18 +150,15 @@ def node_route_question(state: QAState) -> QAState:
 
     q = state.get("question", "").lower()
 
-    # 비교 / 충돌 검증 키워드 (심화 실습 타깃 포함)
     compare_kw = [
         "비교", "차이", "차이점", "어느 모델", "어떤 모델", "맞나요", "맞아", 
         "진짜", "사실", "충돌", "다르", "vs", "hx-2", "hx-pro", "공기질"
     ]
-    # 실시간 웹 / 외부 정보 키워드
     web_kw = [
         "오늘", "현재", "최근", "지금", "실시간", "날씨", "기온", "비", 
         "주가", "환율", "뉴스", "속보", "langgraph", "랭그래프", "serpapi", 
         "가격", "정책", "시세"
     ]
-    # 매뉴얼 제품 / 기능 키워드
     manual_kw = [
         "homabot", "호마봇", "삼성", "비스포크", "설정", "버튼", "청소", 
         "배터리", "충전", "wi-fi", "wifi", "와이파이", "연결", "필터", 
@@ -181,13 +176,11 @@ def node_route_question(state: QAState) -> QAState:
 
     return {"route": chosen}
 
-# 2) 매뉴얼 검색 노드
 def node_manual(state: QAState) -> QAState:
     q = state.get("question", "")
     chunks = retrieve_manual_docs(q)
     return {"manual_context": chunks}
 
-# 3) 웹 검색 노드
 def node_web(state: QAState) -> QAState:
     q = state.get("question", "")
     korea_time = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
@@ -197,7 +190,6 @@ def node_web(state: QAState) -> QAState:
     except Exception as e:
         return {"search_results": [], "searched_at": korea_time, "error": str(e)}
 
-# 4) 비교 검색 노드 (양쪽 동시 수집)
 def node_compare(state: QAState) -> QAState:
     q = state.get("question", "")
     korea_time = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
@@ -208,7 +200,6 @@ def node_compare(state: QAState) -> QAState:
     except Exception as e:
         return {"manual_context": chunks, "search_results": [], "searched_at": korea_time, "error": str(e)}
 
-# 5) 종합 답변 생성 노드
 def node_generate_answer(state: QAState) -> QAState:
     route = state.get("route", "manual")
     q = state.get("question", "")
@@ -216,7 +207,6 @@ def node_generate_answer(state: QAState) -> QAState:
     web_docs = state.get("search_results", [])
     err = state.get("error", "")
 
-    # 웹 검색 에러 시 방어 안내
     if (route in ["web", "compare"]) and err and not web_docs:
         if route == "web":
             return {"answer": f"⚠️ 웹 검색 중 오류가 발생했습니다: {err}\n\nAPI 키 설정 또는 네트워크 상태를 확인해 주세요."}
@@ -256,7 +246,6 @@ def node_generate_answer(state: QAState) -> QAState:
         )
         base_answer = res.choices[0].message.content.strip()
 
-        # 출처 및 링크 후처리 서식 구성
         footer = []
         if manual_docs:
             source_pages = {}
@@ -288,7 +277,6 @@ def node_generate_answer(state: QAState) -> QAState:
     except Exception as e:
         return {"answer": f"답변 생성 중 오류가 발생했습니다: {e}"}
 
-# 6) 그래프 조립
 def decide_branch(state: QAState) -> str:
     return state.get("route", "manual")
 
@@ -317,10 +305,10 @@ builder.add_edge("generate_answer", END)
 advanced_bot_app = builder.compile()
 
 # ==============================================================================
-# 5. Streamlit 화면 디자인 (중앙 정렬 900px 너비 최적화)
+# 5. Streamlit 화면 디자인
 # ==============================================================================
 st.set_page_config(
-    page_title="통합 로봇청소기 지식 상담 챗봇", 
+    page_title="HomaBot 및 삼성 로봇 청소기 지식 상담 챗봇", 
     page_icon="🤖", 
     layout="centered"
 )
@@ -342,7 +330,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🤖 통합 로봇청소기 지식 상담 챗봇")
+# 변경된 메인 제목
+st.title("🤖 HomaBot 및 삼성 로봇 청소기 지식 상담 챗봇")
 st.caption("HomaBot 및 삼성 로봇청소기 매뉴얼 RAG와 구글 웹 검색을 통합 지원합니다.")
 
 mode_option = st.radio(
